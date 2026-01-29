@@ -235,8 +235,17 @@ class ForwardContext:
     #
     # If this value is None (like in some tests), then we end up baking the string
     # into the graph. Otherwise, the moe custom ops will pop a string from this list.
+<<<<<<< HEAD
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
+=======
+    remaining_moe_layers: list[str] | None = None
+    # Same thing for unified_kv_cache_update.
+    # We maintain a list of all layer names that need to execute
+    # unified_kv_cache_update in the order they will be executed.
+    all_kv_cache_update_layers: list[str] | None = None
+    kv_cache_update_index: int = 0
+>>>>>>> 59984902f ([torch.compile] Avoid graph fragmentation in unified_kv_cache_update)
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -274,9 +283,32 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
+<<<<<<< HEAD
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=vllm_config.compilation_config.static_all_moe_layers,
+=======
+    no_compile_layers = vllm_config.compilation_config.static_forward_context
+    from vllm.attention.layer import Attention
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    remaining_moe_layers = [
+        name for name, layer in no_compile_layers.items() if isinstance(layer, FusedMoE)
+    ]
+    remaining_moe_layers.reverse()
+
+    all_kv_cache_update_layers = [
+        name
+        for name, layer in no_compile_layers.items()
+        if isinstance(layer, Attention)
+        and not layer.attn_backend.forward_includes_kv_cache_update
+    ]
+
+    return ForwardContext(
+        no_compile_layers=no_compile_layers,
+        remaining_moe_layers=remaining_moe_layers,
+        all_kv_cache_update_layers=all_kv_cache_update_layers,
+>>>>>>> 59984902f ([torch.compile] Avoid graph fragmentation in unified_kv_cache_update)
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
