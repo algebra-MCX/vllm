@@ -2,22 +2,22 @@
 import pytest
 import torch
 
-from vllm.attention.layer import Attention, unified_kv_cache_update
 from vllm.config import (
     CacheConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
-    set_current_vllm_config,
 )
+from vllm.config import set_current_vllm_config
+from vllm.model_executor.layers.attention.attention import Attention, unified_kv_cache_update
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 
 # Try to import FlashAttentionBackend
 try:
-    from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
     HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 except ImportError:
     HAS_FLASH_ATTN = False
@@ -98,10 +98,6 @@ def test_unified_kv_cache_optimization_index_logic(use_optimization):
             attn_backend=FlashAttentionBackend
         )
         
-        # Move layers to CUDA to ensure buffers (like _k_scale) 
-        # are on the correct device        layer0.to("cuda")
-        layer1.to("cuda")
-        
         # Verify backend properties
         assert not layer0.attn_backend.forward_includes_kv_cache_update
         
@@ -113,8 +109,7 @@ def test_unified_kv_cache_optimization_index_logic(use_optimization):
         dtype = torch.float16
         
         # Get KV cache shape
-        kv_shape = layer0.attn_backend.get_kv_cache_shape(
-            num_blocks, block_size, num_kv_heads, head_size)
+        kv_shape = layer0.attn_backend.get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size)
         
         # Allocate KV cache on GPU
         kv_cache_0 = torch.zeros(kv_shape, dtype=dtype, device="cuda")
@@ -182,13 +177,12 @@ def test_unified_kv_cache_optimization_index_logic(use_optimization):
             
             # --- Out of Bounds Call ---
             logger.info("Testing out of bounds call...")
-            with pytest.raises(AssertionError, 
-                               match="expected the number of KV cache update layers"):
+            with pytest.raises(AssertionError, match="expected the number of KV cache update layers"):
                 unified_kv_cache_update(k, v, "from_forward_context")
             logger.info("Out of bounds check passed.")
                 
         except Exception as e:
-            logger.error("Test failed with exception: %s", e)
+            logger.error(f"Test failed with exception: {e}")
             raise e
         finally:
             vllm.forward_context._forward_context = original_context
