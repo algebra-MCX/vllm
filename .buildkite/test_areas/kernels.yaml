@@ -1115,4 +1115,5 @@ steps:
   - vllm/config/
   commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - export VLLM_DBO_COMM_SMS=0
   - pytest -v -s kernels/moe/test_nixl_ep.py
