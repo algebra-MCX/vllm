@@ -1050,3 +1050,11 @@ def test_shared_experts_keep_outputs_for_each_microbatch(k):
     torch.testing.assert_close(
         runner.run(model, inputs, state), inputs["input_ids"].float()
     )
+
+
+@pytest.mark.cuda_only
+def test_unsupported_backend_does_not_enable_row_staging():
+    runner = _make_execution_runner(_make_dbo_config())
+    assert not runner.stage_real_tokens
+    reason = runner._real_token_staging_unsupported_reason()
+    assert reason is not None and "requires nixl_ep" in reason

@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.forward_context import (
@@ -22,10 +23,11 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -359,6 +361,7 @@ class UBatchRunner:
         self.model_state = model_state
         self.attn_groups = attn_groups
         self.kv_cache_config = kv_cache_config
+        self.stage_real_tokens = self._real_token_staging_unsupported_reason() is None
         # `query_start_loc` and `seq_lens` are rebased onto each microbatch's
         # own token range, so they cannot be views of the full batch's buffers.
         # Allocating up front keeps their addresses stable across replays.
@@ -383,6 +386,92 @@ class UBatchRunner:
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
+
+    def _real_token_staging_unsupported_reason(self) -> str | None:
+        config = self.vllm_config
+        parallel = self.parallel_config
+        if parallel.all2all_backend != "nixl_ep":
+            return f"all2all_backend={parallel.all2all_backend!r}: requires nixl_ep"
+        if type(self.model_state) is not DefaultModelState:
+            return (
+                f"model_state={type(self.model_state).__name__}: "
+                "requires DefaultModelState"
+            )
+        if self.model_state.supports_mm_inputs:
+            return "multimodal inputs: additional relocated inputs are not staged"
+        if self.model_state.rope_state is not None:
+            return "rope_state: position replacement after prepare is not supported"
+        if config.model_config.enable_prompt_embeds:
+            return "enable_prompt_embeds=True: prompt embeddings are not staged"
+        for name, value in (
+            ("tensor_parallel_size", parallel.tensor_parallel_size),
+            ("pipeline_parallel_size", parallel.pipeline_parallel_size),
+            ("prefill_context_parallel_size", parallel.prefill_context_parallel_size),
+            ("decode_context_parallel_size", self.dcp_size),
+        ):
+            if value != 1:
+                return (
+                    f"{name}={value}: staging requires 1; "
+                    "parallel layout is unvalidated"
+                )
+        for name, enabled in (
+            ("lora_config", config.lora_config is not None),
+            ("speculative_config", config.speculative_config is not None),
+            ("enable_eplb", parallel.enable_eplb),
+            ("kv_transfer_config", config.kv_transfer_config is not None),
+            (
+                "enable_return_routed_experts",
+                config.aux_output_config.enable_return_routed_experts,
+            ),
+        ):
+            if enabled:
+                return (
+                    f"{name} enabled: auxiliary inputs or downstream row consumers "
+                    "are not validated"
+                )
+        groups = [group for groups in self.attn_groups for group in groups]
+        if not groups:
+            return "attention groups are empty: no staging-compatible metadata builder"
+        for group in groups:
+            name = group.backend.get_name()
+            if name == "FLASH_ATTN_MLA":
+                continue
+            if name != "FLASH_ATTN":
+                return f"attention_backend={name}: staging metadata is unvalidated"
+            if envs.VLLM_BATCH_INVARIANT:
+                return (
+                    "FLASH_ATTN staging requires AOT; VLLM_BATCH_INVARIANT disables it"
+                )
+            from vllm.v1.attention.backends.flash_attn import (
+                FlashAttentionMetadataBuilder,
+            )
+
+            spec = group.kv_cache_spec
+            if type(spec) is not FullAttentionSpec:
+                return (
+                    f"FLASH_ATTN staging requires FullAttentionSpec, got {type(spec)}"
+                )
+            if (
+                spec.dtype != torch.bfloat16
+                or config.model_config.dtype != torch.bfloat16
+                or config.model_config.quantization is not None
+            ):
+                return "FLASH_ATTN staging requires unquantized BF16 weights and KV"
+            if spec.sliding_window or spec.attention_chunk_size or spec.non_causal:
+                return (
+                    "FLASH_ATTN staging requires global causal attention; "
+                    f"sliding_window={spec.sliding_window}, "
+                    f"attention_chunk_size={spec.attention_chunk_size}, "
+                    f"non_causal={spec.non_causal}"
+                )
+            if len(group.metadata_builders) != self.num_ubatches or any(
+                not isinstance(builder, FlashAttentionMetadataBuilder)
+                or not builder.aot_schedule
+                or not builder.use_full_cuda_graph
+                for builder in group.metadata_builders
+            ):
+                return "FLASH_ATTN staging requires a FULL FA3 builder per microbatch"
+        return None
 
     def prepare(
         self,
