@@ -21,6 +21,7 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
+    dbo_num_ubatches,
     dbo_switch_to_comm,
     dbo_switch_to_compute,
     dbo_yield_and_switch_from_comm_to_compute,
@@ -290,8 +291,38 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             round_scale=self.use_ue8m0_dispatch,
             use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
+            # DBO already provides a separate stream for the full send/recv.
             return_recv_hook=not dbo_enabled(),
         )
+        if dbo_num_ubatches() > 2:
+            # NIXL reuses two receive buffers. Save their contents in the recv
+            # hook, before the next microbatch dispatch can overwrite them.
+            copies: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+            def snapshot(src: torch.Tensor) -> torch.Tensor:
+                dst = torch.empty_like(src)
+                copies.append((dst, src))
+                return dst
+
+            expert_x = (
+                tuple(snapshot(x) for x in expert_x)
+                if isinstance(expert_x, tuple)
+                else snapshot(expert_x)
+            )
+            expert_num_tokens = snapshot(expert_num_tokens)
+            handle = tuple(
+                snapshot(value) if isinstance(value, torch.Tensor) else value
+                for value in handle
+            )
+            recv_hook = hook
+
+            def snapshot_recv_hook():
+                if recv_hook is not None:
+                    recv_hook()
+                for dst, src in copies:
+                    dst.copy_(src)
+
+            hook = snapshot_recv_hook
         self.handles[a2a_idx] = handle
 
         def receiver():
@@ -313,6 +344,8 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 dbo_yield_and_switch_from_comm_to_compute()
                 return receiver()
 
+            # Snapshot copies precede the comm-done event. Keep the generic
+            # MoE handoff from adding a second receive on the compute stream.
             return receive_on_comm
         return hook, receiver
 
