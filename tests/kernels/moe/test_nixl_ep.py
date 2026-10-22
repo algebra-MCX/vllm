@@ -33,7 +33,8 @@ def test_runtime_capacity_uses_dp_and_sp_execution(tokens, sp, dispatchers, expe
     assert prepare.max_num_tokens_per_rank() == 128
 
 
-def test_nixl_dispatch_runs_on_comm_stream():
+@pytest.mark.parametrize("combine", [False, True])
+def test_nixl_dbo_communication_runs_on_comm_stream(combine):
     from unittest.mock import Mock
 
     import nixl_ep
@@ -59,6 +60,13 @@ def test_nixl_dispatch_runs_on_comm_stream():
         return x.unsqueeze(0), torch.tensor([len(x)], device=x.device), (), None, None
 
     buffer.dispatch.side_effect = dispatch
+
+    def combine_output(x, *args, out, **kwargs):
+        assert torch.cuda.current_stream() == runner.comm_stream
+        out.copy_(x.squeeze(0))
+        return out, None, None
+
+    buffer.combine.side_effect = combine_output
     prepare = NixlEPPrepareAndFinalize(buffer, 128, 1, 1)
 
     def model(input_ids, **kwargs):
@@ -68,7 +76,25 @@ def test_nixl_dispatch_runs_on_comm_stream():
             x, torch.ones_like(ids), ids, 1, None, False, FusedMoEQuantConfig.make()
         )
         assert callable(receiver)
-        return receiver()[0].squeeze(0)
+        received = receiver()[0]
+        if not combine:
+            return received.squeeze(0)
+        from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+            TopKWeightAndReduceDelegate,
+        )
+
+        output = torch.empty_like(x)
+        finish = prepare.finalize_async(
+            output,
+            received,
+            torch.ones_like(ids),
+            ids,
+            False,
+            TopKWeightAndReduceDelegate(),
+        )
+        assert callable(finish)
+        finish()
+        return output
 
     state = _make_ubatch_state(
         config, [UBatchSlice(slice(i, i + 4), slice(i, i + 4)) for i in (0, 4)]

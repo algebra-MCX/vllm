@@ -124,6 +124,11 @@ steps:
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s v1/executor
+      - pytest -v -s v1/worker -m 'not cuda_only'
+      - pytest -v -s v1/streaming_input
 
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Offload"
   device: h200_35gb

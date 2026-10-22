@@ -371,13 +371,13 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate), (
             "Weight application and reduction happens in the combine kernel."
         )
 
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled() or do_async
+        do_recv_hook = do_async and not dbo_enabled()
         handle = self.handles[a2a_idx]
         assert handle is not None
 
@@ -389,6 +389,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        dbo_yield_and_switch_from_compute_to_comm()
         _, _, recv_hook = self.buffer.combine(
             fused_expert_output,
             combine_topk_ids,
@@ -400,6 +401,14 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             out=output,
         )
 
+        if dbo_enabled():
+            dbo_switch_to_compute()
+
+            def receive_on_comm():
+                dbo_switch_to_comm()
+                dbo_yield_and_switch_from_comm_to_compute()
+
+            return receive_on_comm
         return recv_hook, lambda: None
 
     def finalize_async(
@@ -410,7 +419,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> tuple[Callable, Callable]:
+    ) -> tuple[Callable, Callable] | Callable:
         return self._finalize(
             output,
             fused_expert_output,
