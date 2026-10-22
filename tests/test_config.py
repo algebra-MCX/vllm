@@ -4254,3 +4254,36 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("count", [0, 1, 2, 3, 4, 8])
+def test_explicit_microbatch_count_takes_precedence(enabled, count):
+    config = ParallelConfig(enable_dbo=enabled, ubatch_size=count)
+    expected = count or (2 if enabled else 0)
+    assert config.num_ubatches == expected
+    assert config.use_ubatching == (expected > 1)
+
+
+@pytest.mark.parametrize(
+    "fixed,v2,backend,seqs,expected",
+    [
+        (0, True, "nixl_ep", 256, 8),
+        (0, True, "nixl_ep", 96, 3),
+        (0, True, "nixl_ep", 16, 2),
+        (4, True, "nixl_ep", 256, 4),
+        (0, False, "nixl_ep", 256, 2),
+        (0, True, "deepep_low_latency", 256, 2),
+    ],
+)
+def test_automatic_microbatch_capacity(fixed, v2, backend, seqs, expected):
+    config = ParallelConfig(
+        enable_dbo=True,
+        ubatch_size=fixed,
+        all2all_backend=backend,
+        data_parallel_size=2,
+        distributed_executor_backend="mp",
+    )
+    config.resolve_ubatch_capacity(v2, seqs)
+    assert config.num_ubatches == expected
+    assert config.auto_ubatching == (fixed == 0 and v2 and backend == "nixl_ep")

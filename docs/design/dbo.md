@@ -41,6 +41,14 @@ EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel
 
 Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
+### Fixed microbatch count
+
+`--ubatch-size K` fixes the microbatch count, including with `--enable-dbo`.
+Zero leaves the choice to DBO, one disables splitting, and a value greater
+than one also enables splitting without `--enable-dbo`. More than two
+microbatches requires the `nixl_ep` backend. Decode and prefill thresholds
+must each be at least the fixed count.
+
 ## DBO Components
 
 * GPUModelRunner
@@ -86,3 +94,11 @@ The `dbo_register_recv_hook` method registers a callback that can be returned by
 The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
 The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
+
+
+### Automatic MRV2 capacity
+
+The MRV2 NIXL DBO capacity is bounded by `dbo_max_num_ubatches` (default 8)
+and `max_num_seqs // dbo_decode_token_threshold`, with a minimum capacity of
+two. An explicit `ubatch_size` bypasses automatic sizing. This limit reserves
+resources; the execution descriptor selects the active count for each step.
