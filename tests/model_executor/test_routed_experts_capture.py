@@ -784,3 +784,49 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+@pytest.fixture
+def dbo_routing_capturer(tmp_path):
+    from transformers import DeepseekV2Config
+
+    from vllm.config import ModelConfig, VllmConfig
+
+    DeepseekV2Config(
+        architectures=["DeepseekV2ForCausalLM"],
+        num_hidden_layers=1,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        )
+    )
+    return RoutedExpertsCapturer(8, config)
+
+
+def test_microbatch_capture_preserves_earlier_rows(dbo_routing_capturer):
+    from vllm.forward_context import ForwardContext, override_forward_context
+
+    capture = dbo_routing_capturer
+    ids = torch.tensor([[1, 2], [3, 4]], device=capture.device_buffer.device)
+    for offset in (0, 2):
+        ctx = ForwardContext(
+            {}, {}, {}, additional_kwargs={"routed_experts_token_offset": offset}
+        )
+        with override_forward_context(ctx):
+            capture.capture(0, ids + offset)
+    torch.testing.assert_close(
+        capture.device_buffer[:4, 0], torch.cat((ids, ids + 2)).int()
+    )
+
+
+def test_routing_snapshot_selects_logical_rows(dbo_routing_capturer):
+    capture = dbo_routing_capturer
+    data = torch.arange(16, device=capture.device_buffer.device).reshape(8, 1, 2)
+    capture.device_buffer.copy_(data)
+    rows = torch.tensor([0, 4, 1, 5], device=data.device)
+    output = capture.snapshot_routing_data(4, rows)
+    capture.device_buffer.zero_()
+    torch.testing.assert_close(output, data[rows].to(capture.output_dtype))
