@@ -419,10 +419,6 @@ class UBatchRunner:
             ("speculative_config", config.speculative_config is not None),
             ("enable_eplb", parallel.enable_eplb),
             ("kv_transfer_config", config.kv_transfer_config is not None),
-            (
-                "enable_return_routed_experts",
-                config.aux_output_config.enable_return_routed_experts,
-            ),
         ):
             if enabled:
                 return (

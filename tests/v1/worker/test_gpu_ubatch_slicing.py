@@ -286,6 +286,7 @@ def _sync_dp(
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
     cudagraph_manager: Any = None,
+    parallel_config: ParallelConfig | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -318,7 +319,8 @@ def _sync_dp(
             uniform_token_count=uniform_token_counts[0] or None,
             dp_size=dp_size,
             dp_rank=0,
-            parallel_config=ParallelConfig(
+            parallel_config=parallel_config
+            or ParallelConfig(
                 enable_dbo=True,
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
                 dbo_prefill_token_threshold=PREFILL_THRESHOLD,
@@ -1157,3 +1159,40 @@ def test_staged_decode_keeps_logical_attention_lengths(staging_runner, n):
         assert (metadata.seq_lens[:count] == 100).all()
         assert (metadata.seq_lens[count:] == 0).all()
         assert ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [64, 64]
+
+
+@pytest.fixture
+def captured_staging_manager(staging_runner):
+    from vllm.config import set_current_vllm_config
+
+    runner = staging_runner
+    value = torch.zeros(1, device=runner.device)
+    with set_current_vllm_config(runner.vllm_config):
+        manager = CudaGraphManager(
+            runner.vllm_config,
+            runner.device,
+            CUDAGraphMode.FULL,
+            decode_query_len=1,
+            ubatch_runner=runner,
+        )
+        manager.capture(lambda desc, warmup: lambda mode: value.add_(1))
+    return manager
+
+
+@pytest.mark.parametrize("tokens", [[33, 128], [64, 128], [97, 128]])
+@pytest.mark.cuda_only
+def test_dp_keeps_captured_decode_when_rows_can_be_staged(
+    captured_staging_manager, tokens
+):
+    manager = captured_staging_manager
+    desc, state = _sync_dp(
+        tokens,
+        [1, 1],
+        cudagraph_manager=manager,
+        parallel_config=manager.vllm_config.parallel_config,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+    assert state is not None
+    assert state.num_tokens_across_dp.tolist() == [128, 128]
+    assert state.num_reqs == 8
