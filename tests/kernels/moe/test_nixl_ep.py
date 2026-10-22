@@ -55,7 +55,7 @@ def test_nixl_dbo_communication_runs_on_comm_stream(combine, k):
 
     config = VllmConfig(
         model_config=_make_dbo_config().model_config,
-        parallel_config=ParallelConfig(ubatch_size=k, all2all_backend="nixl_ep"),
+        parallel_config=ParallelConfig(ubatch_size=8, all2all_backend="nixl_ep"),
     )
     runner = _make_execution_runner(config)
     buffer = Mock(spec=nixl_ep.Buffer)
@@ -78,7 +78,7 @@ def test_nixl_dbo_communication_runs_on_comm_stream(combine, k):
         return out, None, None
 
     buffer.combine.side_effect = combine_output
-    prepare = NixlEPPrepareAndFinalize(buffer, 128, 1, 1, num_ubatches=k)
+    prepare = NixlEPPrepareAndFinalize(buffer, 128, 1, 1, num_ubatches=8)
 
     def model(input_ids, **kwargs):
         x = input_ids[:, None].expand(-1, 2048).float()

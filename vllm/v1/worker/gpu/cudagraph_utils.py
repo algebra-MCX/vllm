@@ -717,6 +717,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     block_tables.get_dummy_slot_mappings(num_tokens),
                     cg_mode=CUDAGraphMode.FULL,
                     for_capture=True,
+                    num_ubatches=desc.num_ubatches,
                 )
                 # Capture with dummy rows marked as padding.
                 input_buffers.is_padding.fill_(True)
