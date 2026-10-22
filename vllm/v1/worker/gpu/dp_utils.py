@@ -43,6 +43,47 @@ class DPSyncState:
     num_reqs: int
 
 
+def _select_ubatch_descriptor(
+    manager: CudaGraphManager | None,
+    config: ParallelConfig,
+    token_counts: list[int],
+    num_reqs: int,
+    uniform_token_count: int | None,
+    uniform_decode: bool,
+    num_active_loras: int,
+) -> BatchExecutionDescriptor:
+    num_tokens = max(token_counts)
+    k = get_num_ubatches(config)
+    desc = None
+    if manager is not None:
+        desc = manager.dispatch(
+            num_reqs,
+            num_tokens,
+            uniform_token_count,
+            num_active_loras=num_active_loras,
+            num_ubatches=k,
+        )
+        can_stage = (
+            manager.ubatch_runner is not None
+            and manager.ubatch_runner.stage_real_tokens
+            and desc.cg_mode == CUDAGraphMode.FULL
+            and uniform_token_count == 1
+        )
+        if (
+            is_last_ubatch_empty(min(token_counts), desc.num_tokens, k)
+            and not can_stage
+        ):
+            desc = None
+    if desc is None:
+        desc = BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_ubatches=k,
+        )
+    return desc
+
+
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
@@ -112,43 +153,15 @@ def sync_cudagraph_and_dp_padding(
             int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
         ):
-            # Expert all-to-all requires every rank to split and pad equally.
-            # Empty microbatches run as dummy batches.
-            ubatch_num_tokens = int(num_tokens_across_dp.max())
-            num_ubatches = get_num_ubatches(parallel_config)
-            ubatch_desc = None
-            if cudagraph_manager is not None:
-                # Match a FULL microbatched CUDA graph, falling back to an eager
-                # descriptor if no graph matches.
-                ubatch_desc = cudagraph_manager.dispatch(
-                    num_reqs,
-                    ubatch_num_tokens,
-                    synced_uniform_token_count,
-                    num_active_loras=num_active_loras,
-                    num_ubatches=num_ubatches,
-                )
-                can_stage = (
-                    cudagraph_manager.ubatch_runner is not None
-                    and cudagraph_manager.ubatch_runner.stage_real_tokens
-                    and ubatch_desc.cg_mode == CUDAGraphMode.FULL
-                    and synced_uniform_token_count == 1
-                )
-                if (
-                    is_last_ubatch_empty(
-                        int(num_tokens_across_dp.min()),
-                        ubatch_desc.num_tokens,
-                        num_ubatches,
-                    )
-                    and not can_stage
-                ):
-                    ubatch_desc = None
-            if ubatch_desc is None:
-                ubatch_desc = BatchExecutionDescriptor(
-                    cg_mode=CUDAGraphMode.NONE,
-                    num_tokens=ubatch_num_tokens,
-                    num_reqs=num_reqs,
-                    num_ubatches=num_ubatches,
-                )
+            ubatch_desc = _select_ubatch_descriptor(
+                cudagraph_manager,
+                parallel_config,
+                num_tokens_across_dp.tolist(),
+                int(num_reqs_across_dp.max()),
+                synced_uniform_token_count,
+                bool(uniform_decode_across_dp),
+                num_active_loras,
+            )
             # Refresh the token count to include CUDA graph padding.
             ubatch_num_tokens = ubatch_desc.num_tokens
             return ubatch_desc, DPSyncState(
