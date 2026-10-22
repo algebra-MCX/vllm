@@ -52,35 +52,56 @@ def _select_ubatch_descriptor(
     uniform_decode: bool,
     num_active_loras: int,
 ) -> BatchExecutionDescriptor:
-    num_tokens = max(token_counts)
-    k = get_num_ubatches(config)
-    desc = None
-    if manager is not None:
-        desc = manager.dispatch(
-            num_reqs,
-            num_tokens,
-            uniform_token_count,
-            num_active_loras=num_active_loras,
-            num_ubatches=k,
+    """Choose a FULL graph, falling back to two eager microbatches in auto mode."""
+    min_tokens, max_tokens = min(token_counts), max(token_counts)
+    threshold = (
+        config.dbo_decode_token_threshold
+        if uniform_decode
+        else config.dbo_prefill_token_threshold
+    )
+    capacity = get_num_ubatches(config)
+    counts = (
+        range(max(2, min(capacity, min_tokens // threshold)), 1, -1)
+        if config.auto_ubatching
+        else (capacity,)
+    )
+    for k in counts:
+        desc = (
+            manager.dispatch(
+                num_reqs,
+                max_tokens,
+                uniform_token_count,
+                num_active_loras=num_active_loras,
+                num_ubatches=k,
+            )
+            if manager is not None
+            else BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=max_tokens,
+                num_reqs=num_reqs,
+                num_active_loras=num_active_loras,
+                num_ubatches=k,
+            )
         )
+        if config.auto_ubatching and k > 2 and desc.cg_mode != CUDAGraphMode.FULL:
+            continue
         can_stage = (
-            manager.ubatch_runner is not None
+            manager is not None
+            and manager.ubatch_runner is not None
             and manager.ubatch_runner.stage_real_tokens
             and desc.cg_mode == CUDAGraphMode.FULL
             and uniform_token_count == 1
         )
-        if (
-            is_last_ubatch_empty(min(token_counts), desc.num_tokens, k)
-            and not can_stage
-        ):
-            desc = None
-    if desc is None:
-        desc = BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=num_reqs,
-            num_ubatches=k,
-        )
+        if is_last_ubatch_empty(min_tokens, desc.num_tokens, k) and not can_stage:
+            if config.auto_ubatching and k > 2:
+                continue
+            desc = replace(
+                desc,
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=max_tokens,
+                num_reqs=num_reqs,
+            )
+        break
     return desc
 
 

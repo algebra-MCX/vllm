@@ -1216,3 +1216,20 @@ def test_graph_manager_captures_each_automatic_active_count(captured_staging_man
         manager.dispatch(128, 128, 1, num_active_loras=0, num_ubatches=5).cg_mode
         == CUDAGraphMode.NONE
     )
+
+
+@pytest.mark.parametrize("staging_runner", [True], indirect=True)
+@pytest.mark.parametrize(
+    "tokens,expected", [([128, 128], 4), ([96, 128], 3), ([64, 128], 2), ([33, 128], 2)]
+)
+@pytest.mark.cuda_only
+def test_dp_selects_a_common_captured_active_count(
+    captured_staging_manager, tokens, expected
+):
+    manager = captured_staging_manager
+    desc = dp_utils._select_ubatch_descriptor(
+        manager, manager.vllm_config.parallel_config, tokens, max(tokens), 1, True, 0
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == expected
+    assert desc.num_tokens == 128
