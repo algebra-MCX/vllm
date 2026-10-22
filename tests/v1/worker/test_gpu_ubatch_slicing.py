@@ -997,3 +997,56 @@ def test_staged_rows_roundtrip_preserves_inputs_and_kv_slots(padded, k):
     torch.testing.assert_close(slots[:, :n], torch.arange(n).unsqueeze(0))
     assert (slots[:, n:] == -1).all()
     assert not batch.is_padding[:n].any() and batch.is_padding[n:].all()
+
+
+@pytest.mark.parametrize("k", [2, 3, 4, 8])
+@pytest.mark.cuda_only
+def test_shared_experts_keep_outputs_for_each_microbatch(k):
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+        SharedExperts,
+        SharedExpertsOrder,
+    )
+    from vllm.v1.worker.ubatch_utils import UBatchSlice
+    from vllm.v1.worker.ubatching import dbo_yield
+
+    config = VllmConfig(
+        model_config=_make_dbo_config().model_config,
+        parallel_config=ParallelConfig(ubatch_size=k, all2all_backend="nixl_ep"),
+    )
+    moe = FusedMoEConfig(
+        8,
+        1,
+        8,
+        16,
+        8,
+        8,
+        MoEActivation.SILU,
+        "cuda",
+        RoutingMethodType.Default,
+        FusedMoEParallelConfig.make_no_parallel(),
+        torch.float32,
+    )
+    with set_current_vllm_config(config):
+        shared = SharedExperts(torch.nn.Identity(), moe, lambda: True, num_ubatches=k)
+    runner = _make_execution_runner(config)
+
+    def model(input_ids, **kwargs):
+        shared(input_ids.float(), SharedExpertsOrder.MK_INTERNAL_OVERLAPPED)
+        dbo_yield()
+        return shared.output
+
+    state = _make_ubatch_state(
+        config,
+        [UBatchSlice(slice(i, i + 2), slice(i, i + 2)) for i in range(0, 2 * k, 2)],
+    )
+    inputs = _make_model_inputs(2 * k, torch.device("cuda", 0))
+    torch.testing.assert_close(
+        runner.run(model, inputs, state), inputs["input_ids"].float()
+    )

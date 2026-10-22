@@ -67,7 +67,7 @@ def test_nixl_dbo_communication_runs_on_comm_stream(combine):
         return out, None, None
 
     buffer.combine.side_effect = combine_output
-    prepare = NixlEPPrepareAndFinalize(buffer, 128, 1, 1)
+    prepare = NixlEPPrepareAndFinalize(buffer, 128, 1, 1, num_ubatches=2)
 
     def model(input_ids, **kwargs):
         x = input_ids[:, None].expand(-1, 2048).float()

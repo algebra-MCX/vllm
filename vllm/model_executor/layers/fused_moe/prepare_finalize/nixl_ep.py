@@ -84,6 +84,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
+        num_ubatches: int = 1,
     ):
         super().__init__()
 
@@ -93,7 +94,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handles: list[tuple | None] = [None, None]
+        self.handles: list[tuple | None] = [None] * num_ubatches
         self.num_dispatchers_ = num_dispatchers
         self.expert_capacity = expert_capacity
 
