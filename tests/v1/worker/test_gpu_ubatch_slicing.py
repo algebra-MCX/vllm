@@ -919,7 +919,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
             torch.device("cuda:0"),
             CUDAGraphMode.FULL,
             decode_query_len=1,
-            ubatch_runner=cast(UBatchRunner, object()),
+            ubatch_runner=_make_execution_runner(vllm_config),
         )
     manager._graphs_captured = True
     return manager
@@ -951,7 +951,8 @@ def test_microbatched_graphs_are_only_offered_to_uniform_batches():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
-def test_microbatched_graph_needs_every_rank_to_reach_the_split():
+@pytest.mark.parametrize("tokens", [[33, 128], [64, 128]])
+def test_microbatched_graph_needs_every_rank_to_reach_the_split(tokens):
     """Fall back to eager on all ranks if any rank cannot reach the captured split."""
     manager = _make_cudagraph_manager([64, 128])
     uniform = [1, 1]
@@ -961,7 +962,7 @@ def test_microbatched_graph_needs_every_rank_to_reach_the_split():
     assert desc.num_ubatches == 2
 
     # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
-    desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    desc, dp_sync_state = _sync_dp(tokens, uniform, cudagraph_manager=manager)
     assert desc.cg_mode == CUDAGraphMode.NONE
     assert desc.num_ubatches == 2
     assert dp_sync_state is not None and dp_sync_state.eager
@@ -1136,4 +1137,23 @@ def test_full_decode_prepare_uses_each_graph_region(staging_runner):
             torch.arange(65, dtype=torch.int32, device=runner.device),
         )
         assert (metadata.seq_lens == 100).all()
+        assert ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [64, 64]
+
+
+@pytest.mark.parametrize("n", [63, 64, 97, 128])
+@pytest.mark.cuda_only
+def test_staged_decode_keeps_logical_attention_lengths(staging_runner, n):
+    runner = staging_runner
+    buffers = InputBuffers(128, 128, runner.device)
+    batch = _make_input_batch([1] * n, [100] * n, buffers, 128, 128)
+    tables = (torch.zeros(128, 8, dtype=torch.int32, device=runner.device),)
+    slots = torch.arange(128, device=runner.device).unsqueeze(0)
+    state = runner.prepare(batch, tables, slots, CUDAGraphMode.FULL)
+    assert (state.staged_rows is not None) == (n <= 64)
+    for i, ctx in enumerate(state.forward_contexts):
+        count = n // 2 + (i < n % 2) if n <= 64 else min(64, n - 64 * i)
+        metadata = ctx.attn_metadata["attn"]
+        assert metadata.query_start_loc[-1] == count
+        assert (metadata.seq_lens[:count] == 100).all()
+        assert (metadata.seq_lens[count:] == 0).all()
         assert ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [64, 64]

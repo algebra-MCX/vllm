@@ -14,7 +14,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds, get_num_ubatches
+from vllm.v1.worker.ubatch_utils import (
+    check_ubatch_thresholds,
+    get_num_ubatches,
+    is_last_ubatch_empty,
+)
 
 
 @dataclass(frozen=True)
@@ -123,9 +127,20 @@ def sync_cudagraph_and_dp_padding(
                     num_active_loras=num_active_loras,
                     num_ubatches=num_ubatches,
                 )
-                if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
-                    # If one rank has an empty second microbatch, run without
-                    # CUDA graphs.
+                can_stage = (
+                    cudagraph_manager.ubatch_runner is not None
+                    and cudagraph_manager.ubatch_runner.stage_real_tokens
+                    and ubatch_desc.cg_mode == CUDAGraphMode.FULL
+                    and synced_uniform_token_count == 1
+                )
+                if (
+                    is_last_ubatch_empty(
+                        int(num_tokens_across_dp.min()),
+                        ubatch_desc.num_tokens,
+                        num_ubatches,
+                    )
+                    and not can_stage
+                ):
                     ubatch_desc = None
             if ubatch_desc is None:
                 ubatch_desc = BatchExecutionDescriptor(

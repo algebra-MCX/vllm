@@ -490,14 +490,42 @@ class UBatchRunner:
         block tables.
         """
         ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
+        staged_rows = None
+        counts = None
+        if (
+            cg_mode == CUDAGraphMode.FULL
+            and not for_capture
+            and input_batch.num_tokens <= ubatch_slices[-1].token_slice.start
+        ):
+            # DP sync established the capability and single-token contract.
+            # Capture/dummy runs bypass it and must never stage dummy rows.
+            staged_rows = stage_decode_tokens(
+                input_batch, block_tables, slot_mappings, ubatch_slices
+            )
+            n = input_batch.num_tokens
+            counts = [
+                n // self.num_ubatches + (i < n % self.num_ubatches)
+                for i in range(self.num_ubatches)
+            ]
+            # Single-token decode uses the captured token regions for request
+            # rows too; the original request slices refer to unstaged inputs.
+            ubatch_slices = [
+                UBatchSlice(s.token_slice, s.token_slice) for s in ubatch_slices
+            ]
 
         attn_metadata = []
         slot_mappings_by_layer = []
         is_padding = []
+        start = 0
         for i, ubatch_slice in enumerate(ubatch_slices):
+            source_slice = ubatch_slice
+            if counts is not None:
+                stop = start + counts[i]
+                source_slice = UBatchSlice(slice(start, stop), slice(start, stop))
+                start = stop
             ubatch = _slice_input_batch(
                 input_batch,
-                ubatch_slice,
+                source_slice,
                 self.ubatch_query_start_loc[i],
                 self.ubatch_seq_lens[i],
                 self.ubatch_dcp_local_seq_lens[i],
@@ -505,6 +533,26 @@ class UBatchRunner:
                 dcp_rank=self.dcp_rank,
                 cp_interleave=self.cp_interleave,
             )
+            if counts is not None:
+                count = counts[i]
+                capacity = ubatch_slice.num_tokens
+                self.ubatch_query_start_loc[i][count + 1 : capacity + 1].fill_(count)
+                self.ubatch_seq_lens[i][count:capacity].zero_()
+                query_cpu = np.minimum(np.arange(capacity + 1, dtype=np.int32), count)
+                seq_cpu = torch.zeros(capacity, dtype=torch.int32)
+                seq_cpu[:count] = ubatch.seq_lens_cpu_upper_bound
+                ubatch = replace(
+                    ubatch,
+                    num_reqs_after_padding=capacity,
+                    num_tokens_after_padding=capacity,
+                    query_start_loc=self.ubatch_query_start_loc[i][: capacity + 1],
+                    query_start_loc_np=query_cpu,
+                    seq_lens=self.ubatch_seq_lens[i][:capacity],
+                    seq_lens_cpu_upper_bound=seq_cpu,
+                    input_ids=input_batch.input_ids[ubatch_slice.token_slice],
+                    positions=input_batch.positions[ubatch_slice.token_slice],
+                    is_padding=input_batch.is_padding[ubatch_slice.token_slice],
+                )
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(
                 block_table[ubatch_slice.request_slice] for block_table in block_tables
@@ -531,6 +579,7 @@ class UBatchRunner:
             forward_contexts=self._make_forward_contexts(
                 ubatch_slices, attn_metadata, slot_mappings_by_layer, is_padding
             ),
+            staged_rows=staged_rows,
         )
 
     def _make_forward_contexts(
