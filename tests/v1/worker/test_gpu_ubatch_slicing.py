@@ -1063,8 +1063,8 @@ def test_unsupported_backend_does_not_enable_row_staging():
     assert reason is not None and "requires nixl_ep" in reason
 
 
-@pytest.fixture
-def staging_runner(tmp_path, dist_init):
+@pytest.fixture(params=[False])
+def staging_runner(tmp_path, dist_init, request):
     from transformers import Qwen3MoeConfig
 
     from vllm.config import AttentionConfig, SchedulerConfig, set_current_vllm_config
@@ -1091,7 +1091,10 @@ def staging_runner(tmp_path, dist_init):
             model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
         ),
         parallel_config=ParallelConfig(
-            enable_dbo=True, all2all_backend="nixl_ep", data_parallel_size=2
+            enable_dbo=True,
+            ubatch_size=0 if request.param else 2,
+            all2all_backend="nixl_ep",
+            data_parallel_size=2,
         ),
         attention_config=AttentionConfig(flash_attn_version=3),
         scheduler_config=SchedulerConfig(
@@ -1106,6 +1109,7 @@ def staging_runner(tmp_path, dist_init):
             max_cudagraph_capture_size=128,
         ),
     )
+    config.parallel_config.resolve_ubatch_capacity(request.param, 128)
     device = torch.device("cuda", 0)
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
@@ -1117,7 +1121,9 @@ def staging_runner(tmp_path, dist_init):
     )
     with set_current_vllm_config(config):
         group = AttentionGroup(FlashAttentionBackend, ["attn"], spec, 0)
-        group.create_metadata_builders(config, device, num_metadata_builders=2)
+        group.create_metadata_builders(
+            config, device, num_metadata_builders=config.parallel_config.num_ubatches
+        )
         state = DefaultModelState(config, torch.nn.Identity(), None, device)
         return UBatchRunner(config, device, state, [[group]], cache, 128)
 
@@ -1196,3 +1202,17 @@ def test_dp_keeps_captured_decode_when_rows_can_be_staged(
     assert state is not None
     assert state.num_tokens_across_dp.tolist() == [128, 128]
     assert state.num_reqs == 8
+
+
+@pytest.mark.parametrize("staging_runner", [True], indirect=True)
+@pytest.mark.cuda_only
+def test_graph_manager_captures_each_automatic_active_count(captured_staging_manager):
+    manager = captured_staging_manager
+    for k in (2, 3, 4):
+        desc = manager.dispatch(128, 128, 1, num_active_loras=0, num_ubatches=k)
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.num_ubatches == k
+    assert (
+        manager.dispatch(128, 128, 1, num_active_loras=0, num_ubatches=5).cg_mode
+        == CUDAGraphMode.NONE
+    )
