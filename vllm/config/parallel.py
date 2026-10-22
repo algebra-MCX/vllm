@@ -273,7 +273,8 @@ class ParallelConfig:
     """The threshold for dual batch overlap for batches only containing decodes.
     If the number of tokens in the request is greater than this threshold,
     microbatching will be used. Otherwise, the request will be processed in a
-    single batch."""
+    single batch. Automatic MRV2 NIXL DBO also uses this as the minimum real
+    tokens per microbatch when considering more than two microbatches."""
     dbo_prefill_token_threshold: int = Field(default=512, ge=0)  # TODO(lucas): tune
     """The threshold for dual batch overlap for batches that contain one or more
     prefills. If the number of tokens in the request is greater than this

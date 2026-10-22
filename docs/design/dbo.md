@@ -34,7 +34,7 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `--all2all-backend` argument must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
+Select `deepep_low_latency` for decode workloads or `deepep_high_throughput` for prefill workloads, with DeepEP installed. MRV2 also supports the `nixl_ep` backend with NIXL EP installed.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `vllm serve deepseek-ai/DeepSeek-V2-Lite --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo --all2all-backend deepep_low_latency`
@@ -48,6 +48,25 @@ Zero leaves the choice to DBO, one disables splitting, and a value greater
 than one also enables splitting without `--enable-dbo`. More than two
 microbatches requires the `nixl_ep` backend. Decode and prefill thresholds
 must each be at least the fixed count.
+
+### Automatic MRV2 capacity
+
+With MRV2, DP greater than one, `--all2all-backend nixl_ep`, `--enable-dbo`,
+and `--ubatch-size 0`, automatic sizing is enabled. Use
+`--dbo-max-num-ubatches K` to bound resource allocation (default 8).
+Other backends and MRV1 retain the two-microbatch default. Counts above two
+require a compatible captured FULL CUDA graph; otherwise selection falls
+back to two eager microbatches.
+
+The MRV2 NIXL DBO capacity is bounded by `dbo_max_num_ubatches` (default 8)
+and `max_num_seqs // dbo_decode_token_threshold`, with a minimum capacity of
+two. An explicit `ubatch_size` bypasses automatic sizing. This limit reserves
+resources; the execution descriptor selects the active count for each step.
+
+For automatic counts above two, each rank must provide at least the
+applicable DBO token threshold in every microbatch. Selection checks real
+rows in the captured regions, including any staged rows, and tries smaller
+counts when the tail would be too small. Two microbatches remain the fallback.
 
 ## DBO Components
 
@@ -94,11 +113,3 @@ The `dbo_register_recv_hook` method registers a callback that can be returned by
 The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
 The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
-
-
-### Automatic MRV2 capacity
-
-The MRV2 NIXL DBO capacity is bounded by `dbo_max_num_ubatches` (default 8)
-and `max_num_seqs // dbo_decode_token_threshold`, with a minimum capacity of
-two. An explicit `ubatch_size` bypasses automatic sizing. This limit reserves
-resources; the execution descriptor selects the active count for each step.

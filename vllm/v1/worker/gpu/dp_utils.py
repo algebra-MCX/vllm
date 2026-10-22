@@ -101,6 +101,17 @@ def _select_ubatch_descriptor(
                 num_tokens=max_tokens,
                 num_reqs=num_reqs,
             )
+        if config.auto_ubatching and k > 2:
+            width = desc.num_tokens // k
+            last_start = width * (k - 1)
+            # A rank stages only when its last region is empty. Other ranks
+            # retain their physical split, which may have a small real tail.
+            smallest = min(
+                n // k if n <= last_start and can_stage else min(width, n - last_start)
+                for n in token_counts
+            )
+            if smallest < threshold:
+                continue
         break
     return desc
 

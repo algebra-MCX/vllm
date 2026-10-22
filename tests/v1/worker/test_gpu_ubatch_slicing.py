@@ -1220,7 +1220,15 @@ def test_graph_manager_captures_each_automatic_active_count(captured_staging_man
 
 @pytest.mark.parametrize("staging_runner", [True], indirect=True)
 @pytest.mark.parametrize(
-    "tokens,expected", [([128, 128], 4), ([96, 128], 3), ([64, 128], 2), ([33, 128], 2)]
+    "tokens,expected",
+    [
+        ([128, 128], 4),
+        ([118, 128], 3),
+        ([97, 128], 2),
+        ([96, 128], 2),
+        ([64, 128], 2),
+        ([33, 128], 2),
+    ],
 )
 @pytest.mark.cuda_only
 def test_dp_selects_a_common_captured_active_count(
