@@ -1058,3 +1058,82 @@ def test_unsupported_backend_does_not_enable_row_staging():
     assert not runner.stage_real_tokens
     reason = runner._real_token_staging_unsupported_reason()
     assert reason is not None and "requires nixl_ep" in reason
+
+
+@pytest.fixture
+def staging_runner(tmp_path, dist_init):
+    from transformers import Qwen3MoeConfig
+
+    from vllm.config import AttentionConfig, SchedulerConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+    from vllm.v1.worker.utils import AttentionGroup
+
+    Qwen3MoeConfig(
+        architectures=["Qwen3MoeForCausalLM"],
+        hidden_size=256,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=64,
+        num_hidden_layers=1,
+        moe_intermediate_size=256,
+        num_experts=8,
+        num_experts_per_tok=2,
+        vocab_size=256,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="nixl_ep", data_parallel_size=2
+        ),
+        attention_config=AttentionConfig(flash_attn_version=3),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=128,
+            max_num_seqs=128,
+            max_num_batched_tokens=128,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            cudagraph_capture_sizes=[128],
+            max_cudagraph_capture_size=128,
+        ),
+    )
+    device = torch.device("cuda", 0)
+    spec = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=64, dtype=torch.bfloat16
+    )
+    cache = KVCacheConfig(
+        num_blocks=1024,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["attn"], spec)],
+    )
+    with set_current_vllm_config(config):
+        group = AttentionGroup(FlashAttentionBackend, ["attn"], spec, 0)
+        group.create_metadata_builders(config, device, num_metadata_builders=2)
+        state = DefaultModelState(config, torch.nn.Identity(), None, device)
+        return UBatchRunner(config, device, state, [[group]], cache, 128)
+
+
+@pytest.mark.cuda_only
+def test_full_decode_prepare_uses_each_graph_region(staging_runner):
+    runner = staging_runner
+    buffers = InputBuffers(128, 128, runner.device)
+    batch = _make_input_batch([1] * 128, [100] * 128, buffers, 128, 128)
+    tables = (torch.zeros(128, 8, dtype=torch.int32, device=runner.device),)
+    slots = torch.arange(128, device=runner.device).unsqueeze(0)
+    state = runner.prepare(batch, tables, slots, CUDAGraphMode.FULL)
+    assert runner.stage_real_tokens
+    assert state.staged_rows is None
+    for ctx in state.forward_contexts:
+        metadata = ctx.attn_metadata["attn"]
+        torch.testing.assert_close(
+            metadata.query_start_loc,
+            torch.arange(65, dtype=torch.int32, device=runner.device),
+        )
+        assert (metadata.seq_lens == 100).all()
+        assert ctx.dp_metadata.num_tokens_across_dp_cpu.tolist() == [64, 64]
