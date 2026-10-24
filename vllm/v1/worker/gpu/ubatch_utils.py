@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Microbatching (DBO) helpers for the V2 GPU model runner."""
 
+import os
 import threading
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -327,6 +328,18 @@ class UBatchRunner:
         self.comm_stream = torch.cuda.Stream(device=device)
         # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
+        # EXPERIMENT: VLLM_EXP_DBO_STREAMS=prio gives compute a higher priority;
+        # =green64 confines compute to a 64-SM green context.
+        mode = os.environ.get("VLLM_EXP_DBO_STREAMS", "")
+        if mode == "prio":
+            low, high = torch.cuda.Stream.priority_range()
+            self.capture_stream = torch.cuda.Stream(device=device, priority=high)
+        elif mode == "green64":
+            self._green = torch.cuda.GreenContext.create(
+                num_sms=64, device_id=device.index
+            )
+            self.capture_stream = self._green.Stream()
+        print(f"EXP_DBO_STREAMS={mode!r} capture_stream={self.capture_stream}", flush=True)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
         self._pending_finish: Callable[[], Any] | None = None
