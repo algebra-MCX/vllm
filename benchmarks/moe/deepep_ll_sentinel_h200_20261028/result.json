@@ -1,0 +1,81 @@
+{
+  "utc": "2026-10-28T18:58:51.090732+00:00",
+  "source_sha": "0e60e1ca696f011fb84579ffd60b31ee8c571030",
+  "base_sha": "0fddee1f5869465a6235d2076f82f1ea70318064",
+  "gpu": "NVIDIA H200",
+  "gpu_count": 1,
+  "torch": "2.13.0+cu129",
+  "cuda": "12.9",
+  "peak_allocated_bytes": 321024,
+  "scope": "Real CUDA tensors and real DeepEP LL adapter; recording external transport. No native transport or model validation.",
+  "sync_debug": "PyTorch CUDA sync-debug error mode passed in adapter dispatch/combine calls; not a full VLLM_GPU_SYNC_CHECK run.",
+  "results": {
+    "base": [
+      {
+        "case": "mixed-padding",
+        "passed": false
+      },
+      {
+        "case": "all-padding",
+        "passed": false
+      },
+      {
+        "case": "linear",
+        "passed": true
+      }
+    ],
+    "fixed": [
+      {
+        "case": "mixed-padding",
+        "passed": true
+      },
+      {
+        "case": "all-padding",
+        "passed": true
+      },
+      {
+        "case": "linear",
+        "passed": true
+      }
+    ],
+    "graph_replay": [
+      {
+        "case": "mixed-padding",
+        "mapped": true,
+        "dispatch_pass": true,
+        "combine_pass": true
+      },
+      {
+        "case": "all-padding",
+        "mapped": true,
+        "dispatch_pass": true,
+        "combine_pass": true
+      },
+      {
+        "case": "valid-only",
+        "mapped": true,
+        "dispatch_pass": true,
+        "combine_pass": true
+      },
+      {
+        "case": "mixed-padding",
+        "mapped": false,
+        "dispatch_pass": true,
+        "combine_pass": true
+      },
+      {
+        "case": "all-padding",
+        "mapped": false,
+        "dispatch_pass": true,
+        "combine_pass": true
+      },
+      {
+        "case": "valid-only",
+        "mapped": false,
+        "dispatch_pass": true,
+        "combine_pass": true
+      }
+    ]
+  },
+  "success": true
+}
