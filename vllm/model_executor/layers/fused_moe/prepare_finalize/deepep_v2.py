@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 from collections.abc import Callable
 
 import deep_ep
@@ -79,7 +81,7 @@ def _unpack_mxfp8_scale(
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
+    """Prepare/Finalize using the DeepEP v2 ElasticBuffer or EPBuffer API.
 
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 
@@ -117,7 +119,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
-        buffer: deep_ep.ElasticBuffer,
+        buffer: deep_ep.ElasticBuffer | deep_ep.EPBuffer,
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,
@@ -137,6 +139,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
         self.sp_size = sp_size
+        self._dispatch_kwargs = {}
+        if isinstance(buffer, getattr(deep_ep, "EPBuffer", ())):
+            self._dispatch_kwargs["do_zero_padding"] = not use_cudagraph
 
         # Set by FusedMoEKernelModularImpl when the experts globalize
         # recv_topk_idx themselves, letting the decode path skip the standalone
@@ -250,6 +255,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             previous_event=previous_event,
             async_with_compute_stream=False,
             allocate_on_comm_stream=previous_event is not None,
+            **self._dispatch_kwargs,
         )
 
         a2a_idx = dbo_current_ubatch_id()
@@ -257,6 +263,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if handoff:
             dbo_switch_to_compute_sync()
+            recv_tensors = recv_x if isinstance(recv_x, tuple) else (recv_x,)
+            dbo_record_stream(
+                *recv_tensors,
+                recv_topk_idx,
+                recv_topk_weights,
+                handle.psum_num_recv_tokens_per_scaleup_rank,
+            )
 
         return lambda: self._receiver(
             event,
@@ -547,6 +560,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
+                dbo_record_stream(combined_x, output)
                 output.copy_(combined_x, non_blocking=True)
                 dbo_yield_and_switch_from_comm_to_compute()
 

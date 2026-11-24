@@ -12,7 +12,7 @@ import torch
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.import_utils import has_deep_ep_v1, has_deep_ep_v2
 
 # Detect Blackwell / B200 (compute capability 10.x)
 try:
@@ -40,15 +40,22 @@ MIN_ACCURACY = 0.61 if current_platform.is_rocm() else 0.62
 # With 64 seqs, decode batches should exceed the 32 token threshold
 MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 
-# DeepEP backends to test
 DEEPEP_BACKENDS = [
-    "deepep_low_latency",
-    "deepep_high_throughput",
-    "deepep_v2",
+    pytest.param(
+        "deepep_low_latency",
+        marks=pytest.mark.skipif(not has_deep_ep_v1(), reason="Requires DeepEP v1"),
+    ),
+    pytest.param(
+        "deepep_high_throughput",
+        marks=pytest.mark.skipif(not has_deep_ep_v1(), reason="Requires DeepEP v1"),
+    ),
+    pytest.param(
+        "deepep_v2",
+        marks=pytest.mark.skipif(not has_deep_ep_v2(), reason="Requires DeepEP v2"),
+    ),
 ]
 
 
-@pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
 @pytest.mark.xfail(
     IS_BLACKWELL,
@@ -59,7 +66,14 @@ DEEPEP_BACKENDS = [
 )
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     """Test DBO with DP+EP using GSM8K evaluation."""
-    _run_dbo_gsm8k(all2all_backend, num_gpus_available)
+    extra_args = None
+    if all2all_backend == "deepep_v2":
+        import deep_ep
+
+        if hasattr(deep_ep, "EPBuffer"):
+            # Exercise the eager compute/communication handoff with DeepEP 2.5.
+            extra_args = ["--compilation-config", '{"mode":0,"cudagraph_mode":"NONE"}']
+    _run_dbo_gsm8k(all2all_backend, num_gpus_available, extra_args=extra_args)
 
 
 # Features combined with DBO. ngram verifies multi-token queries without a
@@ -79,7 +93,7 @@ V2_FEATURES = {
 }
 
 
-@pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
+@pytest.mark.skipif(not has_deep_ep_v1(), reason="Requires DeepEP v1")
 @pytest.mark.parametrize("feature", list(V2_FEATURES))
 def test_dbo_v2_features_gsm8k(feature: str, num_gpus_available):
     """Test DBO combined with spec decode or DCP."""
